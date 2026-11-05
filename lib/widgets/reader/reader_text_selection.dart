@@ -632,11 +632,19 @@ class ReaderBlockMarkPainter extends CustomPainter {
     final line = Paint()
       ..color = underlineColor
       ..strokeWidth = 1.6;
+    final dashed = Paint()
+      ..color = underlineColor
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round;
     for (final underline in rangeUnderlines) {
       final range = blockSelectionRange(block, underline.start, underline.end);
       if (range == null) continue;
       for (final rect in _lineRects(range.$1, range.$2)) {
-        _strokeRow(canvas, rect, line);
+        if (underline.dashed) {
+          _strokeDashedRow(canvas, rect, dashed);
+        } else {
+          _strokeRow(canvas, rect, line);
+        }
       }
     }
   }
@@ -646,6 +654,19 @@ class ReaderBlockMarkPainter extends CustomPainter {
     // Sit the stroke just under the glyphs, inside the line box.
     final y = rect.bottom - .5;
     canvas.drawLine(Offset(rect.left, y), Offset(rect.right, y), line);
+  }
+
+  /// Low-contrast dotted mark used for AI edits; user underlines stay solid.
+  void _strokeDashedRow(Canvas canvas, Rect rect, Paint line) {
+    final y = rect.bottom - .5;
+    const dash = 2.2;
+    const gap = 3.0;
+    var x = rect.left;
+    while (x < rect.right) {
+      final end = math.min(x + dash, rect.right);
+      canvas.drawLine(Offset(x, y), Offset(end, y), line);
+      x += dash + gap;
+    }
   }
 
   @override
