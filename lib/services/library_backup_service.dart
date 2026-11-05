@@ -4,13 +4,17 @@ import 'dart:isolate';
 import 'package:flutter/services.dart';
 
 import '../models/library_backup.dart';
+import 'ai_reading/ai_backup.dart';
+import 'ai_reading/ai_controller.dart';
 import 'library_store.dart';
 import 'shelf_store.dart';
 
 class LibraryBackupService {
   static const _channel = AppMethodChannel('fqapp/library_backup');
 
-  Future<LibraryBackup> capture() async {
+  AiBackupRestoreResult? lastAiRestore;
+
+  Future<LibraryBackup> capture({bool includeAi = true}) async {
     final library = LibraryStore.instance;
     final shelfStore = ShelfStore.instance;
     if (!library.isInitialized || !shelfStore.isReady) {
@@ -18,11 +22,21 @@ class LibraryBackupService {
     }
     final snapshot = await library.backupSnapshot();
     final shelf = shelfStore.records();
+    String? aiData;
+    if (includeAi) {
+      try {
+        aiData = await AiBackupService.instance.encode();
+      } catch (_) {
+        // AI segment failure must not make shelf/progress backup impossible.
+        aiData = null;
+      }
+    }
     return Isolate.run(
       () => LibraryBackup.capture(
         shelf: shelf,
         history: snapshot.history,
         watched: snapshot.watched,
+        aiData: aiData,
       ),
     );
   }
@@ -62,6 +76,16 @@ class LibraryBackupService {
       watched: backup.watched,
     );
     final shelf = await ShelfStore.instance.mergeBackup(backup.shelf);
+    // AI assets are restored after the shelf merge. The AI importer does a
+    // full preflight before writes and keeps local-book assets pending.
+    lastAiRestore = await restoreAi(backup);
     return (shelf: shelf, history: library.history, episodes: library.episodes);
+  }
+
+  Future<AiBackupRestoreResult?> restoreAi(LibraryBackup backup) async {
+    final ai = backup.aiData;
+    if (ai == null || ai.isEmpty) return null;
+    await AiReadingController.instance.init();
+    return AiBackupService.instance.decodeAndRestore(ai);
   }
 }

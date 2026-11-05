@@ -13,20 +13,188 @@ extension _ReaderPageChapterLoading on _ReaderPageState {
     final cancellation = _replacementCancellation =
         TextReplacementCancellation();
     await _replacementStore.load();
+    if (_aiTemporaryOriginal) {
+      return TextReplacementResult(
+        source: content,
+        content: content,
+        snapshotRevision: _replacementStore.snapshot.revision,
+      );
+    }
+    final controller = AiReadingController.instance;
     while (true) {
       final snapshot = _replacementStore.snapshot;
-      final result =
-          await (widget.replacementEngine ?? TextReplacementEngine.instance)
-              .transform(
-                source: content,
-                chapterTitle: title,
-                snapshot: snapshot,
-                cancellation: cancellation,
-              );
+      final view = await controller.viewFor(
+        bookId: widget.bookId,
+        chapterId: _chapter.itemId,
+        chapterTitle: title,
+        content: content,
+        customSnapshot: snapshot,
+        temporaryOriginal: _aiTemporaryOriginal,
+        replacementEngine: widget.replacementEngine,
+      );
       if (cancellation.cancelled ||
-          snapshot.revision == _replacementStore.snapshot.revision) {
-        return result;
+          snapshot.revision != _replacementStore.snapshot.revision) {
+        if (cancellation.cancelled) {
+          return view.composition.replacement;
+        }
+        continue;
       }
+      _aiView = view;
+      _aiRevision = controller.revision;
+      _maybeAutoRequestAi(content, title, view);
+      return view.composition.replacement;
+    }
+  }
+
+  void _maybeAutoRequestAi(
+    ChapterContent content,
+    String title,
+    AiChapterView view,
+  ) {
+    if (view.composition.formal != null) return;
+    if (!view.aiEnabled || !view.consent) return;
+    if (view.mode != AiDisplayMode.aiOptimized) return;
+    final key =
+        '${widget.bookId}|${_chapter.itemId}|${view.snapshot.canonicalHash}';
+    if (_aiAutoRequestedKey == key) return;
+    _aiAutoRequestedKey = key;
+    unawaited(_requestAi(content, title, showBudgetPrompt: false));
+  }
+
+  Future<void> _requestAi(
+    ChapterContent content,
+    String title, {
+    bool forceRefresh = false,
+    bool showBudgetPrompt = true,
+  }) async {
+    final controller = AiReadingController.instance;
+    final result = await controller.requestChapter(
+      bookId: widget.bookId,
+      chapterId: _chapter.itemId,
+      chapterTitle: title,
+      content: content,
+      forceRefresh: forceRefresh,
+    );
+    if (!mounted) return;
+    if (result?.needsBudgetConfirmation == true) {
+      if (!showBudgetPrompt) {
+        _showMessage('预算已达上限，打开 AI 校对面板可确认本次请求');
+        return;
+      }
+      final confirmed = await showAiBudgetDialog(
+        context,
+        result?.budgetMessage ?? '本次请求将超出预算',
+      );
+      if (!mounted || !confirmed) return;
+      await controller.requestChapter(
+        bookId: widget.bookId,
+        chapterId: _chapter.itemId,
+        chapterTitle: title,
+        content: content,
+        forceRefresh: forceRefresh,
+        confirmedOverBudget: true,
+      );
+      return;
+    }
+    if (result != null && !result.ok && result.error != null) {
+      _showMessage(result.error!);
+    }
+  }
+
+  Future<void> _showAiPanel() async {
+    final view = _aiView;
+    if (view == null) {
+      _showMessage('本章还在加载，稍后再打开 AI 校对');
+      return;
+    }
+    await showAiReaderSheet(
+      context,
+      controller: AiReadingController.instance,
+      view: view,
+      preset: _effectivePreset,
+      bookId: widget.bookId,
+      bookTitle: widget.title,
+      chapterId: _chapter.itemId,
+      chapterTitle: _chapter.title,
+      temporaryOriginal: _aiTemporaryOriginal,
+      onRefresh: (forceRefresh) async {
+        await _requestAi(
+          _chapterContent,
+          _chapter.title,
+          forceRefresh: forceRefresh,
+        );
+      },
+      onModeChanged: (mode) async {
+        _aiTemporaryOriginal = false;
+        await AiReadingController.instance.setBookDisplayMode(
+          widget.bookId,
+          mode,
+        );
+        _aiRevision = -1;
+        await _onAiChanged();
+      },
+      onTemporaryOriginalChanged: (value) async {
+        _aiTemporaryOriginal = value;
+        _aiRevision = -1;
+        await _onAiChanged();
+      },
+      onOpenEdit: (span) {
+        final snapshot = _aiView?.snapshot;
+        if (snapshot == null) return;
+        unawaited(
+          showAiEditDetailSheet(
+            context,
+            bookId: widget.bookId,
+            chapterId: _chapter.itemId,
+            snapshot: snapshot,
+            span: span,
+            preset: _effectivePreset,
+            onChanged: () {
+              _aiRevision = -1;
+              unawaited(_onAiChanged());
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _onAiChanged() async {
+    if (!mounted || _loading || _error != null) return;
+    final controller = AiReadingController.instance;
+    if (controller.revision == _aiRevision) return;
+    if (_selection != null || _narrationRange != null) {
+      _aiRefreshTimer?.cancel();
+      _aiRefreshTimer = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) unawaited(_onAiChanged());
+      });
+      return;
+    }
+    final anchor =
+        _chapterLayout?.sourceOffsetForDisplay(
+          _textOffset,
+          bias: TextBoundaryBias.start,
+        ) ??
+        _textOffset;
+    final result = await _replaceContent(_chapterContent, _chapter.title);
+    if (!mounted || _loading || _error != null) return;
+    // A chapter switch may have landed while composing.
+    if (result.source != _chapterContent) return;
+    _setState(() {
+      _replacement = result;
+      _chapterLayout = null;
+      _layoutDisplayRevision = _aiRevision;
+      _savedPosition = <String, dynamic>{
+        'chapterId': _chapter.itemId,
+        'positionVersion': 2,
+        'textOffset': anchor.clamp(0, result.source.legacyText.length),
+      };
+      _needsRestore = true;
+      _textOffset = 0;
+      _progressReady = false;
+    });
+    if (result.error != null) {
+      _showMessage('本章替换失败，已显示原文：${result.error}');
     }
   }
 

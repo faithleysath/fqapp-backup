@@ -4,8 +4,8 @@ part of '../reader_page.dart';
 extension _ReaderPageSelection on _ReaderPageState {
   List<ReaderRangeUnderline> get _displayRangeUnderlines {
     final layout = _chapterLayout;
-    if (layout == null || _replacement == null) return _rangeUnderlines;
-    return [
+    if (layout == null) return _rangeUnderlines;
+    final marks = <ReaderRangeUnderline>[
       for (final mark in _rangeUnderlines)
         if (layout.displayOffsetForSource(
               mark.end,
@@ -22,8 +22,35 @@ extension _ReaderPageSelection on _ReaderPageState {
             ),
             text: mark.text,
             createdAt: mark.createdAt,
+            dashed: mark.dashed,
           ),
     ];
+    // AI changes are display-only marks, not user underlines. They live in
+    // final display coordinates and never enter the underline store.
+    final markStyle = AiReadingController.instance.settings
+        .resolve(widget.bookId)
+        .markStyle;
+    final composition = _aiView?.composition;
+    final spans = composition?.displaySpans.isNotEmpty == true
+        ? composition!.displaySpans
+        : composition?.applied?.spans ?? const <AiEditSpan>[];
+    if (!_aiTemporaryOriginal && markStyle != 'off' && spans.isNotEmpty) {
+      for (final span in spans) {
+        if (span.displayEnd <= span.displayStart) continue;
+        marks.add(
+          ReaderRangeUnderline(
+            bookId: widget.bookId,
+            chapterId: _chapter.itemId,
+            start: span.displayStart,
+            end: span.displayEnd,
+            text: span.replacement,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+            dashed: markStyle == 'dotted',
+          ),
+        );
+      }
+    }
+    return marks;
   }
 
   Future<void> _onParagraphLongPress(
@@ -171,8 +198,9 @@ extension _ReaderPageSelection on _ReaderPageState {
     var topAnchor = _selectionBarTopAnchor;
     var view = media.size;
     var safeArea = media.padding;
-    var avoidBottom =
-        _controlsVisible ? _ReaderPageState._bottomBarHeight : 0.0;
+    var avoidBottom = _controlsVisible
+        ? _ReaderPageState._bottomBarHeight
+        : 0.0;
     final overlayBox =
         _selectionOverlayKey.currentContext?.findRenderObject() as RenderBox?;
     if (overlayBox != null && overlayBox.attached) {
@@ -203,6 +231,7 @@ extension _ReaderPageSelection on _ReaderPageState {
       safeArea: safeArea,
       underlined: underlined,
       showListening: true,
+      showAi: _aiView?.aiEnabled == true,
       avoidBottom: avoidBottom,
     );
     return Positioned(
@@ -213,6 +242,7 @@ extension _ReaderPageSelection on _ReaderPageState {
         underlined: underlined,
         paragraphScoped: selection.isWholeParagraph,
         showListening: true,
+        showAi: _aiView?.aiEnabled == true,
         isDark: preset.isDark,
         belowAnchor: below,
         onAction: (action) {
@@ -280,7 +310,44 @@ extension _ReaderPageSelection on _ReaderPageState {
         await _toggleSelectionUnderline(
           add: action == ReaderParagraphAction.underline,
         );
+      case ReaderParagraphAction.missedChange:
+        await _markMissedSelection();
     }
+  }
+
+  Future<void> _markMissedSelection() async {
+    final selection = _selection;
+    final layout = _chapterLayout;
+    final snapshot = _aiView?.snapshot;
+    if (selection == null || layout == null || snapshot == null) return;
+    final start = layout.sourceOffsetForDisplay(
+      selection.start,
+      bias: TextBoundaryBias.start,
+    );
+    final end = layout.sourceOffsetForDisplay(
+      selection.end,
+      bias: TextBoundaryBias.end,
+    );
+    final paragraph = snapshot.paragraphIndexAt(start);
+    if (paragraph == null ||
+        end <= start ||
+        end > snapshot.paragraphEnd(paragraph)) {
+      _showMessage('漏改了只能标在单个段落内');
+      return;
+    }
+    final created = await showAiMissedSheet(
+      context,
+      bookId: widget.bookId,
+      chapterId: _chapter.itemId,
+      snapshot: snapshot,
+      sourceStart: start,
+      sourceEnd: end,
+      onChanged: () {
+        _aiRevision = -1;
+        unawaited(_onAiChanged());
+      },
+    );
+    if (created && mounted) _showMessage('已记录漏改了');
   }
 
   /// 划线 on the current selection. A whole-paragraph selection keeps the

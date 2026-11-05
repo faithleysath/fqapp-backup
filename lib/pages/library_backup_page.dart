@@ -76,19 +76,44 @@ class _LibraryBackupPageState extends State<LibraryBackupPage> {
     }
   }
 
-  Future<void> _export() => _run('正在导出，请在系统窗口选择保存位置…', () async {
-    final backup = await _service.capture();
-    if (!mounted) return;
-    final saved = await _service.export(backup);
-    if (!mounted) return;
-    setState(() {
-      _message = saved
-          ? '备份文件已保存：${_counts(backup)}。\n'
-                '将这个文件传到新手机，在本页选择导入即可。'
-                '${backup.excludedLocalRecords > 0 ? '\n已排除 ${backup.excludedLocalRecords} 条本地书籍相关记录。' : ''}'
-          : '已取消导出';
+  Future<void> _export() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('备份包含哪些 AI 数据？'),
+        content: const Text(
+          '会包含四类校对反馈及其修订历史、认可改法与原文保护、提示词与候选、'
+          '试验摘要、用量聚合，以及反馈引用到的正文片段。\n\n'
+          '不会包含 API Key、原始请求行、运行明细和试验原始输出。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('继续导出'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run('正在导出，请在系统窗口选择保存位置…', () async {
+      final backup = await _service.capture();
+      if (!mounted) return;
+      final saved = await _service.export(backup);
+      if (!mounted) return;
+      setState(() {
+        _message = saved
+            ? '备份文件已保存：${_counts(backup)}。\n'
+                  'AI 反馈、保护、提示词和用量已一并导出，API Key 不在文件中。\n'
+                  '将这个文件传到新手机，在本页选择导入即可。'
+                  '${backup.excludedLocalRecords > 0 ? '\n已排除 ${backup.excludedLocalRecords} 条本地书籍相关记录。' : ''}'
+            : '已取消导出';
+      });
     });
-  });
+  }
 
   Future<void> _pick() => _run('请选择备份文件，读取后会显示预览…', () async {
     setState(() => _preview = null);
@@ -108,11 +133,13 @@ class _LibraryBackupPageState extends State<LibraryBackupPage> {
       if (!mounted) return;
       setState(() {
         _preview = null;
+        final ai = _service.lastAiRestore;
         _message =
             '恢复完成：新增 ${result.shelf} 条收藏、${result.history} 条进度、'
             '${result.episodes} 集已看标记。\n'
             '保留本机已有收藏/进度 '
-            '${backup.shelf.length + backup.history.length - result.shelf - result.history} 条。';
+            '${backup.shelf.length + backup.history.length - result.shelf - result.history} 条。'
+            '${ai == null ? '' : '\n${ai.summary}'}';
       });
     }, restoring: true);
   }
