@@ -36,13 +36,18 @@ extension _ReaderJoinedContent on _ReaderPageState {
       throw ApiException('正文为空');
     }
     await _replacementStore.load();
-    final replacement =
-        await (widget.replacementEngine ?? TextReplacementEngine.instance)
-            .transform(
-              source: content,
-              chapterTitle: chapter.title,
-              snapshot: _replacementStore.snapshot,
-            );
+    final view = await AiReadingController.instance.viewFor(
+      bookId: widget.bookId,
+      chapterId: chapter.itemId,
+      chapterTitle: chapter.title,
+      content: content,
+      customSnapshot: _replacementStore.snapshot,
+      temporaryOriginal: _aiTemporaryOriginal,
+      previewSourceStart: index == _index ? _aiPreviewSourceStart : null,
+      previewSourceEnd: index == _index ? _aiPreviewSourceEnd : null,
+      replacementEngine: widget.replacementEngine,
+    );
+    final replacement = view.composition.replacement;
     final ideas = await ideasFuture;
     final marks = await marksFuture;
     if (!mounted) throw StateError('Reader disposed');
